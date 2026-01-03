@@ -9,7 +9,14 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 import { 
   Wallet as WalletIcon, 
@@ -20,11 +27,22 @@ import {
   History,
   AlertTriangle,
   Loader2,
+  BarChart3,
+  PieChart,
+  TrendingDown,
+  ArrowDown,
+  ArrowUp,
   Filter,
   Settings as SettingsIcon,
   Download
 } from 'lucide-react';
 import { z } from 'zod';
+import { 
+  fetchWalletData, 
+  fetchTransactions,
+  invalidateUserCache,
+  dataCache
+} from '@/lib/data-cache';
 
 interface WalletData {
   earnedBalance: number;
@@ -63,6 +81,7 @@ const Wallet = () => {
   const [addMoneyOpen, setAddMoneyOpen] = useState(false);
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [addMoneyForm, setAddMoneyForm] = useState({
     amount: '',
@@ -75,21 +94,23 @@ const Wallet = () => {
   });
 
   useEffect(() => {
-    const fetchWalletData = async () => {
+    const fetchWalletAndTransactions = async () => {
       if (!profile?.uid) return;
 
       try {
-        // Fetch wallet
-        const walletSnap = await get(ref(database, `wallets/${profile.uid}`));
-        if (walletSnap.exists()) {
-          setWallet(walletSnap.val());
+        setLoading(true);
+        setError(null);
+
+        // Fetch wallet data
+        const walletData = await fetchWalletData(profile.uid);
+        if (walletData) {
+          setWallet(walletData);
         }
 
         // Fetch transactions
-        const transSnap = await get(ref(database, `transactions/${profile.uid}`));
-        if (transSnap.exists()) {
-          const data = transSnap.val();
-          const transArray: Transaction[] = Object.entries(data)
+        const transactionsData = await fetchTransactions(profile.uid);
+        if (transactionsData) {
+          const transArray: Transaction[] = Object.entries(transactionsData)
             .map(([id, trans]: [string, any]) => ({
               id,
               ...trans,
@@ -99,12 +120,21 @@ const Wallet = () => {
         }
       } catch (error) {
         console.error('Error fetching wallet:', error);
+        setError('Failed to load wallet data. Please try again later.');
+        // Set default values
+        setWallet({
+          earnedBalance: 0,
+          addedBalance: 0,
+          pendingAddMoney: 0,
+          totalWithdrawn: 0
+        });
+        setTransactions([]);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchWalletData();
+    fetchWalletAndTransactions();
   }, [profile?.uid]);
 
   const handleAddMoney = async () => {
@@ -196,9 +226,23 @@ const Wallet = () => {
       setAddMoneyOpen(false);
       setAddMoneyForm({ amount: '', upiTransactionId: '' });
       
-      // Refresh data
-      const walletSnap = await get(ref(database, `wallets/${profile.uid}`));
-      if (walletSnap.exists()) setWallet(walletSnap.val());
+      // Invalidate cache and refetch data
+      invalidateUserCache(profile.uid);
+      const updatedWallet = await fetchWalletData(profile.uid);
+      if (updatedWallet) {
+        setWallet(updatedWallet);
+      }
+      
+      const updatedTransactions = await fetchTransactions(profile.uid);
+      if (updatedTransactions) {
+        const transArray: Transaction[] = Object.entries(updatedTransactions)
+          .map(([id, trans]: [string, any]) => ({
+            id,
+            ...trans,
+          }))
+          .sort((a, b) => b.createdAt - a.createdAt);
+        setTransactions(transArray);
+      }
     } catch (error) {
       console.error('Error adding money:', error);
       toast({
@@ -308,6 +352,24 @@ const Wallet = () => {
 
       setWithdrawOpen(false);
       setWithdrawForm({ amount: '', upiId: '' });
+      
+      // Invalidate cache and refetch data
+      invalidateUserCache(profile.uid);
+      const updatedWallet = await fetchWalletData(profile.uid);
+      if (updatedWallet) {
+        setWallet(updatedWallet);
+      }
+      
+      const updatedTransactions = await fetchTransactions(profile.uid);
+      if (updatedTransactions) {
+        const transArray: Transaction[] = Object.entries(updatedTransactions)
+          .map(([id, trans]: [string, any]) => ({
+            id,
+            ...trans,
+          }))
+          .sort((a, b) => b.createdAt - a.createdAt);
+        setTransactions(transArray);
+      }
     } catch (error) {
       console.error('Error withdrawing:', error);
       toast({
@@ -356,6 +418,21 @@ const Wallet = () => {
     withdrawals: transactions.filter(t => t.type === 'withdrawal').reduce((sum, t) => sum + t.amount, 0),
     added: transactions.filter(t => t.type === 'add_money').reduce((sum, t) => sum + t.amount, 0),
   };
+
+  if (loading && !profile) {
+    return (
+      <div className="min-h-screen flex flex-col bg-gradient-to-b from-background to-muted">
+        <Navbar />
+        <main className="flex-1 container mx-auto px-4 py-8 flex items-center justify-center">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+            <p className="text-muted-foreground">Loading wallet...</p>
+          </div>
+        </main>
+        <Footer />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-background to-muted">
@@ -646,7 +723,15 @@ const Wallet = () => {
             </div>
           </CardHeader>
           <CardContent>
-            {transactions.length === 0 ? (
+            {error && (
+              <div className="text-center py-12">
+                <History className="h-16 w-16 text-destructive/30 mx-auto mb-4" />
+                <p className="text-destructive text-lg mb-2">Error Loading Transactions</p>
+                <p className="text-muted-foreground mb-4">{error}</p>
+                <Button onClick={() => window.location.reload()}>Retry</Button>
+              </div>
+            )}
+            {!error && transactions.length === 0 ? (
               <div className="text-center py-12">
                 <History className="h-16 w-16 text-muted-foreground/30 mx-auto mb-4" />
                 <p className="text-lg text-muted-foreground mb-2">No transactions yet</p>

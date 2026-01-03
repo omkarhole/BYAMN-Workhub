@@ -25,6 +25,12 @@ import {
   Filter,
   Settings
 } from 'lucide-react';
+import { 
+  fetchWalletData, 
+  fetchWorks, 
+  fetchCampaigns,
+  dataCache
+} from '@/lib/data-cache';
 
 interface WalletData {
   earnedBalance: number;
@@ -54,22 +60,44 @@ const Dashboard = () => {
   });
   const [loading, setLoading] = useState(true);
   const [timeRange, setTimeRange] = useState<'week' | 'month' | 'year'>('month');
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchDashboardData = async () => {
       if (!profile?.uid) return;
 
       try {
-        // Fetch wallet
-        const walletSnap = await get(ref(database, `wallets/${profile.uid}`));
-        if (walletSnap.exists()) {
-          setWallet(walletSnap.val());
+        setLoading(true);
+        setError(null);
+
+        // Fetch wallet with error handling
+        let walletData = null;
+        try {
+          walletData = await fetchWalletData(profile.uid);
+          if (walletData) {
+            setWallet(walletData);
+          }
+        } catch (walletError) {
+          console.error('Error fetching wallet:', walletError);
+          // Set default wallet data if fetch fails
+          setWallet({
+            earnedBalance: 0,
+            addedBalance: 0,
+            pendingAddMoney: 0,
+            totalWithdrawn: 0
+          });
         }
 
         // Fetch recent work submissions
-        const worksSnap = await get(ref(database, `works/${profile.uid}`));
-        if (worksSnap.exists()) {
-          const worksData = worksSnap.val();
+        let worksData = {};
+        try {
+          worksData = await fetchWorks(profile.uid);
+        } catch (worksError) {
+          console.error('Error fetching works:', worksError);
+          worksData = {};
+        }
+
+        if (worksData) {
           const worksArray: WorkSubmission[] = Object.entries(worksData).map(([id, data]: [string, any]) => ({
             id,
             ...data,
@@ -93,9 +121,15 @@ const Dashboard = () => {
         }
 
         // Count active campaigns created by user
-        const campaignsSnap = await get(ref(database, 'campaigns'));
-        if (campaignsSnap.exists()) {
-          const campaignsData = campaignsSnap.val();
+        let campaignsData = {};
+        try {
+          campaignsData = await fetchCampaigns();
+        } catch (campaignsError) {
+          console.error('Error fetching campaigns:', campaignsError);
+          campaignsData = {};
+        }
+
+        if (campaignsData) {
           const userCampaigns = Object.values(campaignsData).filter(
             (c: any) => c.creatorId === profile.uid && c.status === 'active'
           );
@@ -103,6 +137,7 @@ const Dashboard = () => {
         }
       } catch (error) {
         console.error('Error fetching dashboard data:', error);
+        setError('Failed to load dashboard data. Please try again later.');
       } finally {
         setLoading(false);
       }
@@ -191,6 +226,21 @@ const Dashboard = () => {
       link: '/leaderboard'
     }
   ];
+
+  if (loading && !profile) {
+    return (
+      <div className="min-h-screen flex flex-col bg-gradient-to-b from-background to-muted">
+        <Navbar />
+        <main className="flex-1 container mx-auto px-4 py-8 flex items-center justify-center">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+            <p className="text-muted-foreground">Loading dashboard...</p>
+          </div>
+        </main>
+        <Footer />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-background to-muted">
@@ -297,7 +347,15 @@ const Dashboard = () => {
               </Link>
             </CardHeader>
             <CardContent>
-              {recentWork.length === 0 ? (
+              {error && (
+                <div className="text-center py-12">
+                  <XCircle className="h-16 w-16 text-destructive/30 mx-auto mb-4" />
+                  <p className="text-destructive text-lg mb-2">Error Loading Data</p>
+                  <p className="text-muted-foreground mb-4">{error}</p>
+                  <Button onClick={() => window.location.reload()}>Retry</Button>
+                </div>
+              )}
+              {!error && recentWork.length === 0 ? (
                 <div className="text-center py-12">
                   <Briefcase className="h-16 w-16 text-muted-foreground/30 mx-auto mb-4" />
                   <p className="text-muted-foreground text-lg mb-2">No work submissions yet</p>
@@ -350,73 +408,80 @@ const Dashboard = () => {
               </Link>
             </CardHeader>
             <CardContent>
-              <div className="space-y-6">
-                <div className="flex items-center justify-between p-4 rounded-lg bg-gradient-to-r from-success/10 to-emerald-500/10 border border-success/20">
-                  <div className="flex items-center gap-3">
-                    <div className="h-12 w-12 rounded-xl bg-gradient-to-r from-success to-emerald-500 flex items-center justify-center">
-                      <TrendingUp className="h-6 w-6 text-white" />
-                    </div>
-                    <div>
-                      <p className="text-sm text-muted-foreground">Earned Balance</p>
-                      <p className="font-semibold text-foreground">From completed tasks</p>
-                    </div>
-                  </div>
-                  <p className="font-display text-2xl font-bold text-success flex items-center">
-                    <IndianRupee className="h-5 w-5" />
-                    {(wallet?.earnedBalance || 0).toFixed(2)}
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between p-4 rounded-lg bg-gradient-to-r from-primary/10 to-accent/10 border border-primary/20">
-                  <div className="flex items-center gap-3">
-                    <div className="h-12 w-12 rounded-xl bg-gradient-to-r from-primary to-accent flex items-center justify-center">
-                      <Wallet className="h-6 w-6 text-white" />
-                    </div>
-                    <div>
-                      <p className="text-sm text-muted-foreground">Added Balance</p>
-                      <p className="font-semibold text-foreground">For campaigns</p>
-                    </div>
-                  </div>
-                  <p className="font-display text-2xl font-bold text-primary flex items-center">
-                    <IndianRupee className="h-4 w-4" />
-                    {(wallet?.addedBalance || 0).toFixed(2)}
-                  </p>
-                </div>
-
-                {(wallet?.pendingAddMoney || 0) > 0 && (
-                  <div className="flex items-center justify-between p-4 rounded-lg bg-gradient-to-r from-pending/10 to-amber-500/10 border border-pending/20">
+              {wallet ? (
+                <div className="space-y-6">
+                  <div className="flex items-center justify-between p-4 rounded-lg bg-gradient-to-r from-success/10 to-emerald-500/10 border border-success/20">
                     <div className="flex items-center gap-3">
-                      <div className="h-12 w-12 rounded-xl bg-gradient-to-r from-pending to-amber-500 flex items-center justify-center">
-                        <Clock className="h-6 w-6 text-white" />
+                      <div className="h-12 w-12 rounded-xl bg-gradient-to-r from-success to-emerald-500 flex items-center justify-center">
+                        <TrendingUp className="h-6 w-6 text-white" />
                       </div>
                       <div>
-                        <p className="text-sm text-muted-foreground">Pending Approval</p>
-                        <p className="font-semibold text-foreground">Add money requests</p>
+                        <p className="text-sm text-muted-foreground">Earned Balance</p>
+                        <p className="font-semibold text-foreground">From completed tasks</p>
                       </div>
                     </div>
-                    <p className="font-display text-2xl font-bold text-pending flex items-center">
-                      <IndianRupee className="h-4 w-4" />
-                      {(wallet?.pendingAddMoney || 0).toFixed(2)}
+                    <p className="font-display text-2xl font-bold text-success flex items-center">
+                      <IndianRupee className="h-5 w-5" />
+                      {(wallet.earnedBalance || 0).toFixed(2)}
                     </p>
                   </div>
-                )}
 
-                <div className="flex items-center justify-between p-4 rounded-lg bg-gradient-to-r from-blue-500/10 to-cyan-500/10 border border-blue-500/20">
-                  <div className="flex items-center gap-3">
-                    <div className="h-12 w-12 rounded-xl bg-gradient-to-r from-blue-500 to-cyan-500 flex items-center justify-center">
-                      <Trophy className="h-6 w-6 text-white" />
+                  <div className="flex items-center justify-between p-4 rounded-lg bg-gradient-to-r from-primary/10 to-accent/10 border border-primary/20">
+                    <div className="flex items-center gap-3">
+                      <div className="h-12 w-12 rounded-xl bg-gradient-to-r from-primary to-accent flex items-center justify-center">
+                        <Wallet className="h-6 w-6 text-white" />
+                      </div>
+                      <div>
+                        <p className="text-sm text-muted-foreground">Added Balance</p>
+                        <p className="font-semibold text-foreground">For campaigns</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-sm text-muted-foreground">Total Withdrawn</p>
-                      <p className="font-semibold text-foreground">Money withdrawn</p>
-                    </div>
+                    <p className="font-display text-2xl font-bold text-primary flex items-center">
+                      <IndianRupee className="h-4 w-4" />
+                      {(wallet.addedBalance || 0).toFixed(2)}
+                    </p>
                   </div>
-                  <p className="font-display text-2xl font-bold text-blue-500 flex items-center">
-                    <IndianRupee className="h-4 w-4" />
-                    {(wallet?.totalWithdrawn || 0).toFixed(2)}
-                  </p>
+
+                  {(wallet.pendingAddMoney || 0) > 0 && (
+                    <div className="flex items-center justify-between p-4 rounded-lg bg-gradient-to-r from-pending/10 to-amber-500/10 border border-pending/20">
+                      <div className="flex items-center gap-3">
+                        <div className="h-12 w-12 rounded-xl bg-gradient-to-r from-pending to-amber-500 flex items-center justify-center">
+                          <Clock className="h-6 w-6 text-white" />
+                        </div>
+                        <div>
+                          <p className="text-sm text-muted-foreground">Pending Approval</p>
+                          <p className="font-semibold text-foreground">Add money requests</p>
+                        </div>
+                      </div>
+                      <p className="font-display text-2xl font-bold text-pending flex items-center">
+                        <IndianRupee className="h-4 w-4" />
+                        {(wallet.pendingAddMoney || 0).toFixed(2)}
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between p-4 rounded-lg bg-gradient-to-r from-blue-500/10 to-cyan-500/10 border border-blue-500/20">
+                    <div className="flex items-center gap-3">
+                      <div className="h-12 w-12 rounded-xl bg-gradient-to-r from-blue-500 to-cyan-500 flex items-center justify-center">
+                        <Trophy className="h-6 w-6 text-white" />
+                      </div>
+                      <div>
+                        <p className="text-sm text-muted-foreground">Total Withdrawn</p>
+                        <p className="font-semibold text-foreground">Money withdrawn</p>
+                      </div>
+                    </div>
+                    <p className="font-display text-2xl font-bold text-blue-500 flex items-center">
+                      <IndianRupee className="h-4 w-4" />
+                      {(wallet.totalWithdrawn || 0).toFixed(2)}
+                    </p>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="text-center py-8">
+                  <Wallet className="h-12 w-12 text-muted-foreground/30 mx-auto mb-4" />
+                  <p className="text-muted-foreground">Wallet data not available</p>
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

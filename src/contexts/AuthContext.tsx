@@ -20,6 +20,12 @@ import {
   isValidPassword,
   validateAndSanitizeProfile
 } from '@/lib/utils';
+import { 
+  dataCache, 
+  fetchUserData, 
+  invalidateUserCache, 
+  clearUserCache 
+} from '@/lib/data-cache';
 
 interface UserProfile {
   uid: string;
@@ -71,11 +77,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   const fetchProfile = async (uid: string) => {
-    const snapshot = await get(child(ref(database), `users/${uid}`));
-    if (snapshot.exists()) {
-      setProfile(snapshot.val());
+    try {
+      const profileData = await fetchUserData(uid);
+      if (profileData) {
+        setProfile(profileData);
+      }
+      return profileData;
+    } catch (error) {
+      console.error('Error fetching profile:', error);
+      return null;
     }
-    return snapshot.val();
   };
 
   const refreshProfile = async () => {
@@ -140,6 +151,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       totalWithdrawn: 0,
     });
     
+    // Set profile in cache
+    dataCache.set(`user:${user.uid}`, newProfile);
+    
     setProfile(newProfile);
   };
 
@@ -160,6 +174,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await signOut(auth);
     setUser(null);
     setProfile(null);
+    
+    // Clear user cache
+    if (user) {
+      clearUserCache(user.uid);
+    }
   };
 
   const resetPassword = async (email: string) => {
@@ -182,6 +201,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const sanitizedData = validation.sanitizedData;
     
     await update(ref(database, `users/${user.uid}`), sanitizedData);
+    
+    // Invalidate and update cache
+    invalidateUserCache(user.uid);
     await fetchProfile(user.uid);
   };
 
