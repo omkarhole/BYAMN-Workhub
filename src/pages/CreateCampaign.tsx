@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { ref, push, set, get, update } from 'firebase/database';
@@ -12,8 +12,19 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { ArrowLeft, Loader2, IndianRupee, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Loader2, IndianRupee, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { deductCampaignBudget } from '@/lib/data-cache';
+
+// --- 1. DEFINING THE FORM TYPE ---
+interface CampaignForm {
+  title: string;
+  description: string;
+  instructions: string;
+  category: string;
+  priority: 'low' | 'medium' | 'high';
+  totalWorkers: string;
+  rewardPerWorker: string;
+}
 
 const CreateCampaign = () => {
   const { profile } = useAuth();
@@ -22,51 +33,50 @@ const CreateCampaign = () => {
   const [loading, setLoading] = useState(false);
   const [walletBalance, setWalletBalance] = useState(0);
 
-  const [form, setForm] = useState({
+  // --- 2. TYPED STATE (Removes "any" errors) ---
+  const [form, setForm] = useState<CampaignForm>({
     title: '',
     description: '',
     instructions: '',
     category: '',
+    priority: 'medium',
     totalWorkers: '',
     rewardPerWorker: '',
   });
 
-  useState(() => {
+  useEffect(() => {
     const fetchBalance = async () => {
       if (profile?.uid) {
-        const snap = await get(ref(database, `wallets/${profile.uid}/addedBalance`));
-        if (snap.exists()) setWalletBalance(snap.val());
+        try {
+          const snap = await get(ref(database, `wallets/${profile.uid}/addedBalance`));
+          if (snap.exists()) {
+            setWalletBalance(snap.val());
+          }
+        } catch (error) {
+          console.error("Balance fetch error:", error);
+        }
       }
     };
     fetchBalance();
-  });
+  }, [profile?.uid]);
 
   const totalCost = (parseInt(form.totalWorkers) || 0) * (parseFloat(form.rewardPerWorker) || 0);
   const canAfford = walletBalance >= totalCost;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!profile?.uid) return;
+    if (!profile?.uid || !profile?.fullName) return;
 
-    // Additional validation
     const totalWorkers = parseInt(form.totalWorkers);
     const rewardPerWorker = parseFloat(form.rewardPerWorker);
     
     if (isNaN(totalWorkers) || totalWorkers <= 0 || totalWorkers > 10000) {
-      toast({ 
-        title: 'Invalid Number of Workers', 
-        description: 'Please enter a valid number of workers (1-10,000).', 
-        variant: 'destructive' 
-      });
+      toast({ title: 'Invalid Number of Workers', description: 'Please enter a valid number (1-10,000).', variant: 'destructive' });
       return;
     }
     
     if (isNaN(rewardPerWorker) || rewardPerWorker < 0.5 || rewardPerWorker > 10000) {
-      toast({ 
-        title: 'Invalid Reward', 
-        description: 'Reward per worker must be between ₹0.50 and ₹10,000.', 
-        variant: 'destructive' 
-      });
+      toast({ title: 'Invalid Reward', description: 'Reward must be between ₹0.50 and ₹10,000.', variant: 'destructive' });
       return;
     }
     
@@ -75,47 +85,36 @@ const CreateCampaign = () => {
       return;
     }
 
-    if (rewardPerWorker < 0.5) {
-      toast({ title: 'Invalid Reward', description: 'Minimum reward is ₹0.50 per worker.', variant: 'destructive' });
-      return;
-    }
-
     setLoading(true);
     try {
-      // Check for rate limiting (check recent campaigns)
-      const recentCampaignsSnap = await get(ref(database, `campaigns`));
-      if (recentCampaignsSnap.exists()) {
-        const recentCampaigns = recentCampaignsSnap.val();
-        const now = Date.now();
-        const oneHourAgo = now - (60 * 60 * 1000); // 1 hour in milliseconds
+      // Rate limit check
+      const campaignsSnap = await get(ref(database, `campaigns`));
+      if (campaignsSnap.exists()) {
+        const campaignsData = campaignsSnap.val();
+        const oneHourAgo = Date.now() - (60 * 60 * 1000);
         
-        let userRecentCampaignCount = 0;
-        for (const campaign of Object.values(recentCampaigns)) {
-          const camp = campaign as any;
-          if (camp.creatorId === profile.uid && camp.createdAt > oneHourAgo) {
-            userRecentCampaignCount++;
-          }
-        }
+        const recentCount = Object.values(campaignsData).filter((camp: any) => 
+          camp.creatorId === profile.uid && camp.createdAt > oneHourAgo
+        ).length;
         
-        // Limit to 2 campaigns per hour per user
-        if (userRecentCampaignCount >= 2) {
-          toast({
-            title: 'Rate Limit Exceeded',
-            description: 'You can only create 2 campaigns per hour.',
-            variant: 'destructive',
-          });
+        if (recentCount >= 2) {
+          toast({ title: 'Rate Limit', description: 'Max 2 campaigns per hour.', variant: 'destructive' });
           setLoading(false);
           return;
         }
       }
 
-      // Create campaign
       const campaignRef = push(ref(database, 'campaigns'));
+      const campaignId = campaignRef.key;
+
+      if (!campaignId) throw new Error("Failed to generate ID");
+
       await set(campaignRef, {
         title: form.title,
         description: form.description,
         instructions: form.instructions,
         category: form.category,
+        priority: form.priority,
         totalWorkers: totalWorkers,
         completedWorkers: 0,
         rewardPerWorker: rewardPerWorker,
@@ -127,25 +126,18 @@ const CreateCampaign = () => {
         createdAt: Date.now(),
       });
 
-      // Use atomic operation to deduct from wallet and update campaign budget
-      const success = await deductCampaignBudget(campaignRef.key, totalCost, profile.uid);
+      const success = await deductCampaignBudget(campaignId, totalCost, profile.uid);
       
       if (!success) {
-        // If the atomic operation failed, remove the campaign
-        await update(ref(database, `campaigns/${campaignRef.key}`), { status: 'failed' });
-        toast({ 
-          title: 'Campaign Creation Failed', 
-          description: 'Failed to update wallet balance. Please try again.', 
-          variant: 'destructive' 
-        });
-        setLoading(false);
+        await update(ref(database, `campaigns/${campaignId}`), { status: 'failed' });
+        toast({ title: 'Update Failed', description: 'Failed to update balance.', variant: 'destructive' });
         return;
       }
 
-      toast({ title: 'Campaign Created!', description: 'Your campaign is now live.' });
+      toast({ title: 'Success!', description: 'Campaign is now live.' });
       navigate('/campaigns');
     } catch (error) {
-      console.error('Error creating campaign:', error);
+      console.error('Create error:', error);
       toast({ title: 'Error', description: 'Failed to create campaign.', variant: 'destructive' });
     } finally {
       setLoading(false);
@@ -171,14 +163,34 @@ const CreateCampaign = () => {
                   <Label>Title</Label>
                   <Input value={form.title} onChange={(e) => setForm(p => ({ ...p, title: e.target.value }))} required />
                 </div>
+                
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-2">
+                    <ShieldAlert className="h-4 w-4 text-primary" /> Task Priority
+                  </Label>
+                  <Select 
+                    value={form.priority} 
+                    onValueChange={(v: 'low' | 'medium' | 'high') => setForm(p => ({ ...p, priority: v }))}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Select priority" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="low">Low (General)</SelectItem>
+                      <SelectItem value="medium">Medium (Standard)</SelectItem>
+                      <SelectItem value="high">High (Urgent)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
                 <div className="space-y-2">
                   <Label>Description</Label>
                   <Textarea value={form.description} onChange={(e) => setForm(p => ({ ...p, description: e.target.value }))} rows={3} required />
                 </div>
+                
                 <div className="space-y-2">
-                  <Label>Instructions for Workers</Label>
-                  <Textarea value={form.instructions} onChange={(e) => setForm(p => ({ ...p, instructions: e.target.value }))} rows={4} required />
+                  <Label>Instructions</Label>
+                  <Textarea value={form.instructions} onChange={(e) => setForm(p => ({ ...p, instructions: e.target.value }))} rows={3} required />
                 </div>
+
                 <div className="space-y-2">
                   <Label>Category</Label>
                   <Select value={form.category} onValueChange={(v) => setForm(p => ({ ...p, category: v }))}>
@@ -188,38 +200,31 @@ const CreateCampaign = () => {
                       <SelectItem value="Survey">Survey</SelectItem>
                       <SelectItem value="Testing">Testing</SelectItem>
                       <SelectItem value="Content">Content</SelectItem>
-                      <SelectItem value="Other">Other</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
+
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label>Total Workers</Label>
-                    <Input type="number" min="1" value={form.totalWorkers} onChange={(e) => setForm(p => ({ ...p, totalWorkers: e.target.value }))} required />
+                    <Label>Workers Count</Label>
+                    <Input type="number" value={form.totalWorkers} onChange={(e) => setForm(p => ({ ...p, totalWorkers: e.target.value }))} required />
                   </div>
                   <div className="space-y-2">
-                    <Label>Reward per Worker (₹)</Label>
-                    <Input type="number" min="0.5" step="0.1" value={form.rewardPerWorker} onChange={(e) => setForm(p => ({ ...p, rewardPerWorker: e.target.value }))} required />
+                    <Label>Reward (₹)</Label>
+                    <Input type="number" step="0.1" value={form.rewardPerWorker} onChange={(e) => setForm(p => ({ ...p, rewardPerWorker: e.target.value }))} required />
                   </div>
                 </div>
 
-                <div className="p-4 rounded-lg bg-muted">
-                  <div className="flex justify-between mb-2">
+                <div className="p-4 rounded-lg bg-muted space-y-2">
+                  <div className="flex justify-between">
                     <span>Total Cost:</span>
-                    <span className="font-bold flex items-center"><IndianRupee className="h-4 w-4" />{totalCost.toFixed(2)}</span>
+                    <span className="font-bold">₹{totalCost.toFixed(2)}</span>
                   </div>
                   <div className="flex justify-between">
                     <span>Your Balance:</span>
-                    <span className={`font-bold ${canAfford ? 'text-success' : 'text-destructive'}`}>₹{walletBalance.toFixed(2)}</span>
+                    <span className={`font-bold ${canAfford ? 'text-green-600' : 'text-destructive'}`}>₹{walletBalance.toFixed(2)}</span>
                   </div>
                 </div>
-
-                {!canAfford && totalCost > 0 && (
-                  <div className="flex items-center gap-2 p-3 bg-destructive/10 rounded-lg">
-                    <AlertTriangle className="h-4 w-4 text-destructive" />
-                    <span className="text-sm text-destructive">Insufficient balance. Add money to continue.</span>
-                  </div>
-                )}
 
                 <Button type="submit" className="w-full" disabled={loading || !canAfford}>
                   {loading && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
