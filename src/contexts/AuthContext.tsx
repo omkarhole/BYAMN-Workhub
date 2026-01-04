@@ -200,7 +200,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     
     const sanitizedData = validation.sanitizedData;
     
-    await update(ref(database, `users/${user.uid}`), sanitizedData);
+    // Ensure we don't update sensitive fields
+    const allowedFields = ['fullName', 'bio', 'profileImage', 'socialLinks'];
+    const filteredData: Partial<UserProfile> = {};
+    
+    for (const field of allowedFields) {
+      if (sanitizedData[field] !== undefined) {
+        filteredData[field] = sanitizedData[field];
+      }
+    }
+    
+    await update(ref(database, `users/${user.uid}`), filteredData);
     
     // Invalidate and update cache
     invalidateUserCache(user.uid);
