@@ -301,8 +301,12 @@ export const updateWalletBalance = async (
       }
       
       // Update cache with new data
-      dataCache.set(cacheKey, finalData);
-      return finalData;
+      dataCache.set(cacheKey, result.snapshot.val());
+      
+      // Invalidate related caches to ensure consistency
+      invalidateUserCache(uid);
+      
+      return result.snapshot.val();
     } else {
       // Transaction was aborted
       console.warn(`Wallet balance update transaction was aborted for user ${uid}`);
@@ -406,9 +410,9 @@ export const createTransactionAndAdjustWallet = async (
       
       // Update cache with new data
       dataCache.set(cacheKey, result.snapshot.val());
-    } else {
-      console.warn(`Transaction creation and wallet update was aborted for user ${uid}`);
-      throw new Error('Failed to create transaction and update wallet. Please try again.');
+      
+      // Invalidate related caches to ensure consistency
+      invalidateUserCache(uid);
     }
   } catch (error: any) {
     console.error('Error creating transaction and updating wallet:', error);
@@ -541,17 +545,8 @@ export const deductCampaignBudget = async (
       });
       
       if (walletResult.committed) {
-        // Final validation after both transactions
-        const finalWalletData = walletResult.snapshot.val();
-        if (!validateWalletData(finalWalletData)) {
-          console.error('Invalid wallet data returned from transaction:', finalWalletData);
-          // Rollback campaign budget if wallet data is invalid
-          await update(campaignRef, { remainingBudget: campaignResult.snapshot.val().remainingBudget + amount });
-          throw new Error('Wallet validation failed after deduction');
-        }
-        
-        // Invalidate cache
-        dataCache.clear(`wallet:${uid}`);
+        // Invalidate user caches to ensure consistency
+        invalidateUserCache(uid);
         dataCache.clear(`campaigns:all`);
         return true;
       } else {
@@ -677,17 +672,24 @@ export const approveWorkAndCredit = async (
         const userSnap = await get(userRef);
         if (userSnap.exists()) {
           const userData = userSnap.val();
-          if (userData) {
-            await update(userRef, {
-              earnedMoney: (userData.earnedMoney || 0) + reward,
-              approvedWorks: (userData.approvedWorks || 0) + 1
-            });
+          
+          // Validate user data before updating
+          const currentEarnedMoney = typeof userData.earnedMoney === 'number' ? userData.earnedMoney : 0;
+          const currentApprovedWorks = typeof userData.approvedWorks === 'number' ? userData.approvedWorks : 0;
+          
+          // Validate new values
+          if (currentEarnedMoney + reward < 0 || currentApprovedWorks + 1 < 0) {
+            throw new Error('Invalid user data values');
           }
+          
+          await update(userRef, {
+            earnedMoney: currentEarnedMoney + reward,
+            approvedWorks: currentApprovedWorks + 1
+          });
         }
         
-        // Invalidate cache
-        dataCache.clear(`wallet:${userId}`);
-        dataCache.clear(`works:${userId}`);
+        // Invalidate user caches to ensure consistency
+        invalidateUserCache(userId);
         return true;
       } else {
         // Rollback work status if wallet update failed
@@ -808,17 +810,8 @@ export const processMoneyRequest = async (
         });
         
         if (result.committed) {
-          const finalWalletData = result.snapshot.val();
-          
-          // Final validation after transaction
-          if (!validateWalletData(finalWalletData)) {
-            console.error('Invalid wallet data returned from transaction:', finalWalletData);
-            // Rollback request status if wallet data is invalid
-            await update(requestRef, { status: 'pending' });
-            throw new Error('Wallet validation failed after add money');
-          }
-          
-          dataCache.clear(`wallet:${userId}`);
+          // Invalidate user caches to ensure consistency
+          invalidateUserCache(userId);
           return true;
         } else {
           // Rollback request status if wallet update failed
@@ -884,7 +877,8 @@ export const processMoneyRequest = async (
             }
           }
           
-          dataCache.clear(`wallet:${userId}`);
+          // Invalidate user caches to ensure consistency
+          invalidateUserCache(userId);
           return true;
         } else {
           // Rollback request status if wallet update failed
@@ -990,8 +984,8 @@ export const applyToCampaign = async (
       completedWorkers: campaignData.completedWorkers + 1
     });
 
-    // Invalidate cache
-    dataCache.clear(`works:${userId}`);
+    // Invalidate user caches to ensure consistency
+    invalidateUserCache(userId);
     dataCache.clear(`campaigns:all`);
     dataCache.clear(`campaign:${campaignId}`);
 
@@ -1066,9 +1060,8 @@ export const submitWorkForCampaign = async (
       submittedAt: Date.now(),
     });
 
-    // Invalidate cache
-    dataCache.clear(`works:${userId}`);
-    dataCache.clear(`works:${userId}:${campaignId}`);
+    // Invalidate user caches to ensure consistency
+    invalidateUserCache(userId);
 
     return true;
   } catch (error: any) {
@@ -1146,8 +1139,8 @@ export const rejectWorkAndRestoreCampaignBudget = async (
       }
     }
 
-    // Invalidate cache
-    dataCache.clear(`works:${userId}`);
+    // Invalidate user caches to ensure consistency
+    invalidateUserCache(userId);
     dataCache.clear(`campaigns:all`);
     dataCache.clear(`campaign:${campaignId}`);
 
