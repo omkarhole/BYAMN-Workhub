@@ -259,12 +259,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       sanitizedData.bio = sanitizeInput(data.bio);
     }
     
-    if (data.profileImage) {
-      // Validate URL before saving
-      if (isValidUrl(data.profileImage)) {
-        sanitizedData.profileImage = data.profileImage;
+    // Ensure we don't update sensitive fields
+    const allowedFields = ['fullName', 'bio', 'profileImage', 'socialLinks'];
+    const filteredData: Partial<UserProfile> = {};
+    
+    for (const field of allowedFields) {
+      if (sanitizedData[field] !== undefined) {
+        filteredData[field] = sanitizedData[field];
       }
     }
+    
+    await update(ref(database, `users/${user.uid}`), filteredData);
     
     if (data.socialLinks) {
       sanitizedData.socialLinks = {};
