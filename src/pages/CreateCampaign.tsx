@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { ref, push, set, get, update } from 'firebase/database';
@@ -13,7 +13,14 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { ArrowLeft, Loader2, IndianRupee, AlertTriangle, ShieldAlert } from 'lucide-react';
-import { deductCampaignBudget } from '@/lib/data-cache';
+import { deductCampaignBudget, fetchWalletData } from '@/lib/data-cache';
+import { 
+  sanitizeInput, 
+  isValidCampaignTitle, 
+  isValidCampaignDescription, 
+  isValidCampaignInstructions, 
+  isValidCampaignCategory 
+} from '@/lib/utils';
 
 // --- 1. DEFINING THE FORM TYPE ---
 interface CampaignForm {
@@ -33,7 +40,7 @@ const CreateCampaign = () => {
   const [loading, setLoading] = useState(false);
   const [walletBalance, setWalletBalance] = useState(0);
 
-  // --- 2. TYPED STATE (Removes "any" errors) ---
+  // --- 2. TYPED STATE ---
   const [form, setForm] = useState<CampaignForm>({
     title: '',
     description: '',
@@ -48,17 +55,22 @@ const CreateCampaign = () => {
     const fetchBalance = async () => {
       if (profile?.uid) {
         try {
-          const snap = await get(ref(database, `wallets/${profile.uid}/addedBalance`));
-          if (snap.exists()) {
-            setWalletBalance(snap.val());
+          const walletData = await fetchWalletData(profile.uid);
+          if (walletData) {
+            setWalletBalance(walletData.addedBalance || 0);
           }
         } catch (error) {
-          console.error("Balance fetch error:", error);
+          console.error('Error fetching wallet balance:', error);
+          toast({ 
+            title: 'Error', 
+            description: 'Failed to load wallet balance.', 
+            variant: 'destructive' 
+          });
         }
       }
     };
     fetchBalance();
-  }, [profile?.uid]);
+  }, [profile?.uid, toast]);
 
   const totalCost = (parseInt(form.totalWorkers) || 0) * (parseFloat(form.rewardPerWorker) || 0);
   const canAfford = walletBalance >= totalCost;
@@ -67,32 +79,42 @@ const CreateCampaign = () => {
     e.preventDefault();
     if (!profile?.uid || !profile?.fullName) return;
 
+    // Sanitize inputs for security
+    const sanitizedTitle = sanitizeInput(form.title);
+    const sanitizedDescription = sanitizeInput(form.description);
+    const sanitizedInstructions = sanitizeInput(form.instructions);
+    
+    // Validation Logic
+    if (!isValidCampaignTitle(sanitizedTitle)) {
+      toast({ title: 'Invalid Title', description: 'Title must be 3-100 characters.', variant: 'destructive' });
+      return;
+    }
+    
+    if (!isValidCampaignDescription(sanitizedDescription)) {
+      toast({ title: 'Invalid Description', description: 'Description is too short or too long.', variant: 'destructive' });
+      return;
+    }
+    
     const totalWorkers = parseInt(form.totalWorkers);
     const rewardPerWorker = parseFloat(form.rewardPerWorker);
     
     if (isNaN(totalWorkers) || totalWorkers <= 0 || totalWorkers > 10000) {
-      toast({ title: 'Invalid Number of Workers', description: 'Please enter a valid number (1-10,000).', variant: 'destructive' });
-      return;
-    }
-    
-    if (isNaN(rewardPerWorker) || rewardPerWorker < 0.5 || rewardPerWorker > 10000) {
-      toast({ title: 'Invalid Reward', description: 'Reward must be between ₹0.50 and ₹10,000.', variant: 'destructive' });
+      toast({ title: 'Invalid Workers', description: 'Enter a number between 1-10,000.', variant: 'destructive' });
       return;
     }
     
     if (!canAfford) {
-      toast({ title: 'Insufficient Balance', description: 'Add money to your wallet first.', variant: 'destructive' });
+      toast({ title: 'Insufficient Balance', description: 'Please add money to your wallet.', variant: 'destructive' });
       return;
     }
 
     setLoading(true);
     try {
-      // Rate limit check
+      // Rate Limit Check
       const campaignsSnap = await get(ref(database, `campaigns`));
       if (campaignsSnap.exists()) {
         const campaignsData = campaignsSnap.val();
         const oneHourAgo = Date.now() - (60 * 60 * 1000);
-        
         const recentCount = Object.values(campaignsData).filter((camp: any) => 
           camp.creatorId === profile.uid && camp.createdAt > oneHourAgo
         ).length;
@@ -106,18 +128,17 @@ const CreateCampaign = () => {
 
       const campaignRef = push(ref(database, 'campaigns'));
       const campaignId = campaignRef.key;
-
       if (!campaignId) throw new Error("Failed to generate ID");
 
       await set(campaignRef, {
-        title: form.title,
-        description: form.description,
-        instructions: form.instructions,
+        title: sanitizedTitle,
+        description: sanitizedDescription,
+        instructions: sanitizedInstructions,
         category: form.category,
         priority: form.priority,
-        totalWorkers: totalWorkers,
+        totalWorkers,
         completedWorkers: 0,
-        rewardPerWorker: rewardPerWorker,
+        rewardPerWorker,
         totalBudget: totalCost,
         remainingBudget: totalCost,
         creatorId: profile.uid,
@@ -126,15 +147,16 @@ const CreateCampaign = () => {
         createdAt: Date.now(),
       });
 
+      // Atomic Balance Deduction
       const success = await deductCampaignBudget(campaignId, totalCost, profile.uid);
       
       if (!success) {
         await update(ref(database, `campaigns/${campaignId}`), { status: 'failed' });
-        toast({ title: 'Update Failed', description: 'Failed to update balance.', variant: 'destructive' });
+        toast({ title: 'Payment Failed', description: 'Could not deduct from wallet.', variant: 'destructive' });
         return;
       }
 
-      toast({ title: 'Success!', description: 'Campaign is now live.' });
+      toast({ title: 'Success!', description: 'Campaign created successfully.' });
       navigate('/campaigns');
     } catch (error) {
       console.error('Create error:', error);
@@ -184,11 +206,6 @@ const CreateCampaign = () => {
                 <div className="space-y-2">
                   <Label>Description</Label>
                   <Textarea value={form.description} onChange={(e) => setForm(p => ({ ...p, description: e.target.value }))} rows={3} required />
-                </div>
-                
-                <div className="space-y-2">
-                  <Label>Instructions</Label>
-                  <Textarea value={form.instructions} onChange={(e) => setForm(p => ({ ...p, instructions: e.target.value }))} rows={3} required />
                 </div>
 
                 <div className="space-y-2">
