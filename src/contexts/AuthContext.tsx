@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { 
   User, 
   createUserWithEmailAndPassword, 
@@ -10,22 +10,8 @@ import {
 } from 'firebase/auth';
 import { ref, set, get, child, update } from 'firebase/database';
 import { auth, database } from '@/lib/firebase';
-import { 
-  sanitizeInput, 
-  isValidUrl, 
-  validateUserProfile, 
-  isValidProfileImage, 
-  isValidName, 
-  isValidEmail,
-  isValidPassword,
-  validateAndSanitizeProfile
-} from '@/lib/utils';
-import { 
-  dataCache, 
-  fetchUserData, 
-  invalidateUserCache, 
-  clearUserCache 
-} from '@/lib/data-cache';
+import { sanitizeInput, isValidUrl, isValidEmail, isValidPassword, isValidName } from '@/lib/utils';
+import { dataCache } from '@/lib/data-cache';
 
 interface UserProfile {
   uid: string;
@@ -59,6 +45,9 @@ interface AuthContextType {
   resetPassword: (email: string) => Promise<void>;
   updateProfile: (data: Partial<UserProfile>) => Promise<void>;
   refreshProfile: () => Promise<void>;
+  // Session management
+  setSessionTimeout: (timeoutMs: number) => void;
+  forceLogout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -75,18 +64,61 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  
+  // Session timeout configuration
+  const [sessionTimeout, setSessionTimeout] = useState<number>(30 * 60 * 1000); // 30 minutes default
+  const [lastActivity, setLastActivity] = useState<number>(Date.now());
+  const sessionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Function to reset session timeout
+  const resetSessionTimeout = () => {
+    setLastActivity(Date.now());
+    
+    // Clear existing timeout if any
+    if (sessionTimeoutRef.current) {
+      clearTimeout(sessionTimeoutRef.current);
+    }
+    
+    // Set new timeout
+    sessionTimeoutRef.current = setTimeout(() => {
+      // Auto logout when session expires
+      handleSessionTimeout();
+    }, sessionTimeout);
+  };
+  
+  // Function to handle session timeout
+  const handleSessionTimeout = async () => {
+    console.log('Session timed out due to inactivity');
+    await forceLogout();
+  };
+  
+  // Function to force logout (used for session timeout)
+  const forceLogout = async () => {
+    if (sessionTimeoutRef.current) {
+      clearTimeout(sessionTimeoutRef.current);
+    }
+    
+    // Clear Firebase auth state
+    await signOut(auth);
+    
+    // Clear local state
+    setUser(null);
+    setProfile(null);
+    
+    // Clear all cached data
+    dataCache.clearAll();
+    
+    // Clear any stored session data
+    localStorage.clear();
+    sessionStorage.clear();
+  };
 
   const fetchProfile = async (uid: string) => {
-    try {
-      const profileData = await fetchUserData(uid);
-      if (profileData) {
-        setProfile(profileData);
-      }
-      return profileData;
-    } catch (error) {
-      console.error('Error fetching profile:', error);
-      return null;
+    const snapshot = await get(child(ref(database), `users/${uid}`));
+    if (snapshot.exists()) {
+      setProfile(snapshot.val());
     }
+    return snapshot.val();
   };
 
   const refreshProfile = async () => {
@@ -96,17 +128,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
+    // Set up event listeners for user activity
+    const handleUserActivity = () => {
+      resetSessionTimeout();
+    };
+    
+    // Add event listeners for user activity
+    window.addEventListener('mousedown', handleUserActivity);
+    window.addEventListener('keydown', handleUserActivity);
+    window.addEventListener('scroll', handleUserActivity);
+    window.addEventListener('touchstart', handleUserActivity);
+    
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setUser(user);
       if (user) {
         await fetchProfile(user.uid);
+        // Start session timeout tracking
+        resetSessionTimeout();
       } else {
         setProfile(null);
+        // Clear timeout when user logs out
+        if (sessionTimeoutRef.current) {
+          clearTimeout(sessionTimeoutRef.current);
+        }
       }
       setLoading(false);
     });
 
-    return unsubscribe;
+    // Clean up event listeners and timeout
+    return () => {
+      unsubscribe();
+      window.removeEventListener('mousedown', handleUserActivity);
+      window.removeEventListener('keydown', handleUserActivity);
+      window.removeEventListener('scroll', handleUserActivity);
+      window.removeEventListener('touchstart', handleUserActivity);
+      if (sessionTimeoutRef.current) {
+        clearTimeout(sessionTimeoutRef.current);
+      }
+    };
   }, []);
 
   const signUp = async (email: string, password: string, fullName: string) => {
@@ -143,6 +202,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       fullName: sanitizeInput(fullName),
       bio: '',
       socialLinks: {},
+      profileImage: undefined,
       role: 'user',
       isBlocked: false,
       createdAt: Date.now(),
@@ -169,49 +229,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const signIn = async (email: string, password: string) => {
-    // Validate inputs before signing in
-    if (!isValidEmail(email)) {
-      throw new Error('Please enter a valid email address');
-    }
-    
-    if (!password || password.length < 1) {
-      throw new Error('Password cannot be empty');
-    }
-    
     await signInWithEmailAndPassword(auth, email, password);
   };
 
   const logout = async () => {
+    if (sessionTimeoutRef.current) {
+      clearTimeout(sessionTimeoutRef.current);
+    }
+    
+    // Sign out from Firebase
     await signOut(auth);
+    
+    // Clear local state
     setUser(null);
     setProfile(null);
     
-    // Clear user cache
-    if (user) {
-      clearUserCache(user.uid);
-    }
+    // Clear all cached data
+    dataCache.clearAll();
+    
+    // Clear any stored session data
+    localStorage.clear();
+    sessionStorage.clear();
   };
 
   const resetPassword = async (email: string) => {
-    if (!isValidEmail(email)) {
-      throw new Error('Please enter a valid email address');
-    }
-    
     await sendPasswordResetEmail(auth, email);
   };
 
   const updateProfile = async (data: Partial<UserProfile>) => {
     if (!user) return;
     
-<<<<<<< Updated upstream
-    // Validate and sanitize the profile data
-    const validation = validateAndSanitizeProfile(data);
-    if (!validation.isValid) {
-      throw new Error(validation.errors.join(', '));
-    }
-    
-    const sanitizedData = validation.sanitizedData;
-=======
     // Sanitize profile data to prevent XSS and injection attacks
     const sanitizedData: Partial<UserProfile> = {};
     
@@ -269,12 +316,51 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error('Invalid Other URL');
       }
     }
->>>>>>> Stashed changes
+=======
+    // Sanitize profile data to prevent XSS and injection attacks
+    const sanitizedData: Partial<UserProfile> = {};
+    
+    if (data.fullName) {
+      sanitizedData.fullName = sanitizeInput(data.fullName);
+    }
+    
+    if (data.bio) {
+      sanitizedData.bio = sanitizeInput(data.bio);
+    }
+    
+    // Ensure we don't update sensitive fields
+    const allowedFields = ['fullName', 'bio', 'profileImage', 'socialLinks'];
+    const filteredData: Partial<UserProfile> = {};
+    
+    for (const field of allowedFields) {
+      if (sanitizedData[field] !== undefined) {
+        filteredData[field] = sanitizedData[field];
+      }
+    }
+    
+    await update(ref(database, `users/${user.uid}`), filteredData);
+    
+    if (data.socialLinks) {
+      sanitizedData.socialLinks = {};
+      
+      if (data.socialLinks.linkedin && isValidUrl(data.socialLinks.linkedin)) {
+        sanitizedData.socialLinks.linkedin = data.socialLinks.linkedin;
+      }
+      if (data.socialLinks.twitter && isValidUrl(data.socialLinks.twitter)) {
+        sanitizedData.socialLinks.twitter = data.socialLinks.twitter;
+      }
+      if (data.socialLinks.instagram && isValidUrl(data.socialLinks.instagram)) {
+        sanitizedData.socialLinks.instagram = data.socialLinks.instagram;
+      }
+      if (data.socialLinks.youtube && isValidUrl(data.socialLinks.youtube)) {
+        sanitizedData.socialLinks.youtube = data.socialLinks.youtube;
+      }
+      if (data.socialLinks.other && isValidUrl(data.socialLinks.other)) {
+        sanitizedData.socialLinks.other = data.socialLinks.other;
+      }
+    }
     
     await update(ref(database, `users/${user.uid}`), sanitizedData);
-    
-    // Invalidate and update cache
-    invalidateUserCache(user.uid);
     await fetchProfile(user.uid);
   };
 
@@ -288,6 +374,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     resetPassword,
     updateProfile,
     refreshProfile,
+    // Session management functions
+    setSessionTimeout,
+    forceLogout,
   };
 
   return (
