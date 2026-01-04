@@ -1258,6 +1258,9 @@ export const fetchTimeBasedLeaderboard = async (
 
 // Validation functions
 
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 
 // Utility functions for common data fetching operations

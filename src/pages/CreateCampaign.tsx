@@ -14,7 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useToast } from '@/hooks/use-toast';
 import { ArrowLeft, Loader2, IndianRupee, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { deductCampaignBudget, fetchWalletData } from '@/lib/data-cache';
-import { sanitizeInput, isValidCampaignTitle, isValidCampaignDescription, isValidCampaignInstructions, isValidCampaignCategory } from '@/lib/utils';
+import { sanitizeInput } from '@/lib/utils';
+import { validateCampaignTitle, validateCampaignDescription, validateCampaignInstructions, validateCampaignCategory } from '@/lib/validation';
 
 const CreateCampaign = () => {
   const { profile } = useAuth();
@@ -68,7 +69,7 @@ const CreateCampaign = () => {
     const sanitizedInstructions = sanitizeInput(form.instructions);
     
     // Validate inputs
-    if (!isValidCampaignTitle(sanitizedTitle)) {
+    if (!validateCampaignTitle(sanitizedTitle)) {
       toast({ 
         title: 'Invalid Title', 
         description: 'Campaign title must be 3-100 characters long and not contain malicious content.', 
@@ -77,7 +78,7 @@ const CreateCampaign = () => {
       return;
     }
     
-    if (!isValidCampaignDescription(sanitizedDescription)) {
+    if (!validateCampaignDescription(sanitizedDescription)) {
       toast({ 
         title: 'Invalid Description', 
         description: 'Campaign description must be 10-2000 characters long and not contain malicious content.', 
@@ -86,7 +87,7 @@ const CreateCampaign = () => {
       return;
     }
     
-    if (!isValidCampaignInstructions(sanitizedInstructions)) {
+    if (!validateCampaignInstructions(sanitizedInstructions)) {
       toast({ 
         title: 'Invalid Instructions', 
         description: 'Campaign instructions must be 10-5000 characters long and not contain malicious content.', 
@@ -95,7 +96,7 @@ const CreateCampaign = () => {
       return;
     }
     
-    if (!isValidCampaignCategory(form.category)) {
+    if (!validateCampaignCategory(form.category)) {
       toast({ 
         title: 'Invalid Category', 
         description: 'Please select a valid campaign category.', 
