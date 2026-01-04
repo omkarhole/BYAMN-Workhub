@@ -153,6 +153,16 @@ const Wallet = () => {
       });
       return;
     }
+    
+    // Additional validation to prevent excessive amounts
+    if (amount > 100000) {
+      toast({
+        title: 'Amount Exceeds Limit',
+        description: 'Maximum amount per request is ₹100,000.',
+        variant: 'destructive',
+      });
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -192,6 +202,11 @@ const Wallet = () => {
         upiTransactionId: addMoneyForm.upiTransactionId,
         createdAt: Date.now(),
       };
+      
+      // Validate transaction before creating
+      if (typeof transaction.amount !== 'number' || transaction.amount <= 0 || transaction.amount > 100000) {
+        throw new Error('Invalid transaction amount');
+      }
 
       // Update wallet to reflect pending add money using atomic operation
       await createTransactionAndAdjustWallet(profile.uid, transaction, {
@@ -283,6 +298,16 @@ const Wallet = () => {
       });
       return;
     }
+    
+    // Additional validation to prevent excessive withdrawals
+    if (amount > 50000) {
+      toast({
+        title: 'Amount Exceeds Limit',
+        description: 'Maximum withdrawal per request is ₹50,000.',
+        variant: 'destructive',
+      });
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -322,6 +347,11 @@ const Wallet = () => {
         upiId: withdrawForm.upiId,
         createdAt: Date.now(),
       };
+      
+      // Validate transaction before creating
+      if (typeof transaction.amount !== 'number' || transaction.amount <= 0 || transaction.amount > 50000) {
+        throw new Error('Invalid transaction amount');
+      }
 
       await createTransactionAndAdjustWallet(profile.uid, transaction, {
         earnedBalance: -amount // Deduct from earned balance

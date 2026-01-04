@@ -107,6 +107,10 @@ export const dataCache = new DataCache();
 
 // Verify user authorization
 const verifyUserAuthorization = async (currentUserId: string, targetUserId: string, requiredRole?: 'admin'): Promise<boolean> => {
+  if (!currentUserId || !targetUserId) {
+    return false;
+  }
+  
   if (requiredRole === 'admin') {
     // Check if current user is an admin
     const userRef = ref(database, `users/${currentUserId}`);
@@ -132,6 +136,98 @@ const verifyUserAuthorization = async (currentUserId: string, targetUserId: stri
   }
   
   return false;
+};
+
+// Validate wallet data to prevent invalid values
+const validateWalletData = (walletData: WalletBalance): boolean => {
+  if (!walletData) return false;
+  
+  // Check for negative values
+  if (walletData.earnedBalance < 0 || 
+      walletData.addedBalance < 0 || 
+      walletData.pendingAddMoney < 0 || 
+      walletData.totalWithdrawn < 0) {
+    return false;
+  }
+  
+  // Check for reasonable upper limits
+  if (walletData.earnedBalance > 10000000 || 
+      walletData.addedBalance > 10000000 || 
+      walletData.pendingAddMoney > 10000000 || 
+      walletData.totalWithdrawn > 10000000) {
+    return false;
+  }
+  
+  return true;
+};
+
+// Validate transaction data
+const validateTransactionData = (transaction: any): boolean => {
+  if (!transaction || !transaction.type || !transaction.amount || !transaction.status || !transaction.createdAt) {
+    return false;
+  }
+  
+  // Validate transaction type
+  const validTypes = ['add_money', 'withdrawal', 'earning', 'campaign_spend'];
+  if (!validTypes.includes(transaction.type)) {
+    return false;
+  }
+  
+  // Validate amount
+  if (typeof transaction.amount !== 'number' || transaction.amount <= 0 || transaction.amount > 100000) {
+    return false;
+  }
+  
+  // Validate status
+  const validStatuses = ['pending', 'approved', 'rejected', 'paid'];
+  if (!validStatuses.includes(transaction.status)) {
+    return false;
+  }
+  
+  // Validate timestamp
+  if (typeof transaction.createdAt !== 'number' || transaction.createdAt > Date.now() + 60000) { // Allow 1 min future drift
+    return false;
+  }
+  
+  return true;
+};
+
+// Validate campaign data
+const validateCampaignData = (campaignData: any): boolean => {
+  if (!campaignData || !campaignData.title || !campaignData.description || !campaignData.creatorId || 
+      campaignData.totalWorkers === undefined || campaignData.rewardPerWorker === undefined || 
+      campaignData.totalBudget === undefined || campaignData.remainingBudget === undefined || 
+      campaignData.createdAt === undefined) {
+    return false;
+  }
+  
+  // Validate string fields
+  if (typeof campaignData.title !== 'string' || 
+      campaignData.title.length < 1 || campaignData.title.length > 100 ||
+      typeof campaignData.description !== 'string' ||
+      campaignData.description.length < 1 || campaignData.description.length > 1000) {
+    return false;
+  }
+  
+  // Validate numeric fields
+  if (typeof campaignData.totalWorkers !== 'number' || 
+      campaignData.totalWorkers <= 0 || campaignData.totalWorkers > 10000 ||
+      typeof campaignData.rewardPerWorker !== 'number' ||
+      campaignData.rewardPerWorker < 0.5 || campaignData.rewardPerWorker > 10000 ||
+      typeof campaignData.totalBudget !== 'number' ||
+      campaignData.totalBudget < 0 ||
+      typeof campaignData.remainingBudget !== 'number' ||
+      campaignData.remainingBudget < 0 ||
+      typeof campaignData.createdAt !== 'number') {
+    return false;
+  }
+  
+  // Validate budget consistency
+  if (campaignData.remainingBudget > campaignData.totalBudget) {
+    return false;
+  }
+  
+  return true;
 };
 
 // Atomic wallet operations using Firebase transactions
@@ -164,13 +260,29 @@ export const updateWalletBalance = async (
       }
       
       // Apply the updates to the current data
-      return { ...currentBalance, ...updateValues };
+      const updatedBalance = { ...currentBalance, ...updateValues };
+      
+      // Validate the updated balance before committing
+      if (!validateWalletData(updatedBalance)) {
+        console.error('Invalid wallet data after update:', updatedBalance);
+        return undefined; // Abort transaction
+      }
+      
+      return updatedBalance;
     });
     
     if (result.committed) {
+      const finalData = result.snapshot.val();
+      
+      // Final validation after transaction
+      if (!validateWalletData(finalData)) {
+        console.error('Invalid wallet data returned from transaction:', finalData);
+        throw new Error('Wallet validation failed after update');
+      }
+      
       // Update cache with new data
-      dataCache.set(cacheKey, result.snapshot.val());
-      return result.snapshot.val();
+      dataCache.set(cacheKey, finalData);
+      return finalData;
     } else {
       // Transaction was aborted
       return null;
@@ -191,6 +303,11 @@ export const createTransactionAndAdjustWallet = async (
   // Verify authorization if currentUserId is provided
   if (currentUserId && !(await verifyUserAuthorization(currentUserId, uid))) {
     throw new Error('Unauthorized: You can only update your own wallet');
+  }
+  
+  // Validate transaction data before creating
+  if (!validateTransactionData(transaction)) {
+    throw new Error('Invalid transaction data');
   }
   
   const transactionRef = ref(database, `transactions/${uid}`);
@@ -232,12 +349,26 @@ export const createTransactionAndAdjustWallet = async (
       updatedBalance.pendingAddMoney = Math.max(0, updatedBalance.pendingAddMoney);
       updatedBalance.totalWithdrawn = Math.max(0, updatedBalance.totalWithdrawn);
       
+      // Validate the updated balance before committing
+      if (!validateWalletData(updatedBalance)) {
+        console.error('Invalid wallet data after transaction:', updatedBalance);
+        return undefined; // Abort transaction
+      }
+      
       return updatedBalance;
     });
     
     if (result.committed) {
+      const finalData = result.snapshot.val();
+      
+      // Final validation after transaction
+      if (!validateWalletData(finalData)) {
+        console.error('Invalid wallet data returned from transaction:', finalData);
+        throw new Error('Wallet validation failed after transaction');
+      }
+      
       // Update cache with new data
-      dataCache.set(cacheKey, result.snapshot.val());
+      dataCache.set(cacheKey, finalData);
     }
   } catch (error) {
     console.error('Error creating transaction and updating wallet:', error);
@@ -257,6 +388,11 @@ export const deductCampaignBudget = async (
     throw new Error('Unauthorized: You can only deduct from your own campaigns');
   }
   
+  // Validate input parameters
+  if (typeof amount !== 'number' || amount <= 0 || amount > 10000000) {
+    throw new Error('Invalid amount for campaign budget deduction');
+  }
+  
   const campaignRef = ref(database, `campaigns/${campaignId}`);
   const walletRef = ref(database, `wallets/${uid}`);
   
@@ -272,9 +408,20 @@ export const deductCampaignBudget = async (
       throw new Error('Unauthorized: You can only deduct from your own campaigns');
     }
     
+    // Validate campaign data
+    if (!validateCampaignData(campaignData)) {
+      throw new Error('Invalid campaign data');
+    }
+    
     // Update campaign budget atomically
     const campaignResult = await runTransaction(campaignRef, (currentData) => {
       if (!currentData) return undefined; // Abort if campaign doesn't exist
+      
+      // Validate campaign data during transaction
+      if (!validateCampaignData(currentData)) {
+        console.error('Invalid campaign data during transaction:', currentData);
+        return undefined; // Abort transaction
+      }
       
       // Check if there's enough remaining budget
       if (currentData.remainingBudget < amount) {
@@ -282,10 +429,18 @@ export const deductCampaignBudget = async (
       }
       
       // Deduct from remaining budget
-      return {
+      const updatedCampaign = {
         ...currentData,
         remainingBudget: currentData.remainingBudget - amount
       };
+      
+      // Validate updated campaign data
+      if (!validateCampaignData(updatedCampaign)) {
+        console.error('Invalid campaign data after update:', updatedCampaign);
+        return undefined; // Abort transaction
+      }
+      
+      return updatedCampaign;
     });
     
     if (campaignResult.committed) {
@@ -304,13 +459,30 @@ export const deductCampaignBudget = async (
         }
         
         // Deduct from added balance
-        return {
+        const updatedBalance = {
           ...currentBalance,
           addedBalance: currentBalance.addedBalance - amount
         };
+        
+        // Validate updated wallet data
+        if (!validateWalletData(updatedBalance)) {
+          console.error('Invalid wallet data after deduction:', updatedBalance);
+          return undefined; // Abort transaction
+        }
+        
+        return updatedBalance;
       });
       
       if (walletResult.committed) {
+        // Final validation after both transactions
+        const finalWalletData = walletResult.snapshot.val();
+        if (!validateWalletData(finalWalletData)) {
+          console.error('Invalid wallet data returned from transaction:', finalWalletData);
+          // Rollback campaign budget if wallet data is invalid
+          await update(campaignRef, { remainingBudget: campaignResult.snapshot.val().remainingBudget + amount });
+          throw new Error('Wallet validation failed after deduction');
+        }
+        
         // Invalidate cache
         dataCache.clear(`wallet:${uid}`);
         dataCache.clear(`campaigns:all`);
@@ -342,6 +514,11 @@ export const approveWorkAndCredit = async (
     throw new Error('Unauthorized: Only admins can approve work');
   }
   
+  // Validate input parameters
+  if (typeof reward !== 'number' || reward <= 0 || reward > 10000) {
+    throw new Error('Invalid reward amount for work approval');
+  }
+  
   const workRef = ref(database, `works/${userId}/${workId}`);
   const walletRef = ref(database, `wallets/${userId}`);
   const userRef = ref(database, `users/${userId}`);
@@ -358,10 +535,21 @@ export const approveWorkAndCredit = async (
       throw new Error('Work is not in pending status');
     }
     
+    // Validate work data
+    if (typeof workData.reward !== 'number' || workData.reward <= 0 || workData.reward > 10000) {
+      throw new Error('Invalid reward in work data');
+    }
+    
     // Update work status atomically
     const workResult = await runTransaction(workRef, (currentData) => {
       if (!currentData || currentData.status !== 'pending') {
         return undefined; // Abort if work doesn't exist or is not pending
+      }
+      
+      // Validate work data during transaction
+      if (typeof currentData.reward !== 'number' || currentData.reward <= 0 || currentData.reward > 10000) {
+        console.error('Invalid reward in work data during transaction:', currentData);
+        return undefined; // Abort transaction
       }
       
       return {
@@ -381,10 +569,18 @@ export const approveWorkAndCredit = async (
         };
         
         // Add to earned balance
-        return {
+        const updatedBalance = {
           ...currentBalance,
           earnedBalance: currentBalance.earnedBalance + reward
         };
+        
+        // Validate updated wallet data
+        if (!validateWalletData(updatedBalance)) {
+          console.error('Invalid wallet data after work approval:', updatedBalance);
+          return undefined; // Abort transaction
+        }
+        
+        return updatedBalance;
       });
       
       if (walletResult.committed) {
@@ -392,10 +588,38 @@ export const approveWorkAndCredit = async (
         const userSnap = await get(userRef);
         if (userSnap.exists()) {
           const userData = userSnap.val();
+          
+          // Validate user data before updating
+          const currentEarnedMoney = typeof userData.earnedMoney === 'number' ? userData.earnedMoney : 0;
+          const currentApprovedWorks = typeof userData.approvedWorks === 'number' ? userData.approvedWorks : 0;
+          
+          // Validate new values
+          if (currentEarnedMoney + reward < 0 || currentApprovedWorks + 1 < 0) {
+            throw new Error('Invalid user data values');
+          }
+          
           await update(userRef, {
-            earnedMoney: (userData.earnedMoney || 0) + reward,
-            approvedWorks: (userData.approvedWorks || 0) + 1
+            earnedMoney: currentEarnedMoney + reward,
+            approvedWorks: currentApprovedWorks + 1
           });
+        }
+        
+        // Final validation after transaction
+        const finalWalletData = walletResult.snapshot.val();
+        if (!validateWalletData(finalWalletData)) {
+          console.error('Invalid wallet data returned from transaction:', finalWalletData);
+          // Rollback work status if wallet data is invalid
+          await update(workRef, { status: 'pending' });
+          // Rollback user profile update
+          const userSnap = await get(userRef);
+          if (userSnap.exists()) {
+            const userData = userSnap.val();
+            await update(userRef, {
+              earnedMoney: Math.max(0, (userData.earnedMoney || 0) - reward),
+              approvedWorks: Math.max(0, (userData.approvedWorks || 0) - 1)
+            });
+          }
+          throw new Error('Wallet validation failed after work approval');
         }
         
         // Invalidate cache
@@ -430,6 +654,13 @@ export const processMoneyRequest = async (
     throw new Error('Unauthorized: Only admins can process money requests');
   }
   
+  // Validate input parameters
+  if (typeof amount !== 'number' || amount <= 0 || 
+      (type === 'add_money' && (amount < 10 || amount > 100000)) ||
+      (type === 'withdrawal' && (amount < 500 || amount > 50000))) {
+    throw new Error('Invalid amount for money request processing');
+  }
+  
   const requestPath = type === 'add_money' ? 'adminRequests/addMoney' : 'adminRequests/withdrawals';
   const requestRef = ref(database, `${requestPath}/${requestId}`);
   const walletRef = ref(database, `wallets/${userId}`);
@@ -447,6 +678,11 @@ export const processMoneyRequest = async (
       throw new Error('Request is not in pending status');
     }
     
+    // Validate request data
+    if (requestData.amount !== amount || requestData.type !== type || requestData.userId !== userId) {
+      throw new Error('Request data does not match provided parameters');
+    }
+    
     // Update request status
     await update(requestRef, { status });
     
@@ -461,14 +697,38 @@ export const processMoneyRequest = async (
             totalWithdrawn: 0,
           };
           
-          return {
+          // Validate current wallet data
+          if (!validateWalletData(currentBalance)) {
+            console.error('Invalid wallet data during add money transaction:', currentBalance);
+            return undefined; // Abort transaction
+          }
+          
+          const updatedBalance = {
             ...currentBalance,
             addedBalance: currentBalance.addedBalance + amount,
             pendingAddMoney: Math.max(0, currentBalance.pendingAddMoney - amount)
           };
+          
+          // Validate updated wallet data
+          if (!validateWalletData(updatedBalance)) {
+            console.error('Invalid wallet data after add money:', updatedBalance);
+            return undefined; // Abort transaction
+          }
+          
+          return updatedBalance;
         });
         
         if (result.committed) {
+          const finalWalletData = result.snapshot.val();
+          
+          // Final validation after transaction
+          if (!validateWalletData(finalWalletData)) {
+            console.error('Invalid wallet data returned from transaction:', finalWalletData);
+            // Rollback request status if wallet data is invalid
+            await update(requestRef, { status: 'pending' });
+            throw new Error('Wallet validation failed after add money');
+          }
+          
           dataCache.clear(`wallet:${userId}`);
           return true;
         } else {
@@ -486,25 +746,58 @@ export const processMoneyRequest = async (
             totalWithdrawn: 0,
           };
           
+          // Validate current wallet data
+          if (!validateWalletData(currentBalance)) {
+            console.error('Invalid wallet data during withdrawal transaction:', currentBalance);
+            return undefined; // Abort transaction
+          }
+          
           // Check if user has enough earned balance
           if (currentBalance.earnedBalance < amount) {
             return undefined; // Abort transaction
           }
           
-          return {
+          const updatedBalance = {
             ...currentBalance,
             earnedBalance: currentBalance.earnedBalance - amount,
             totalWithdrawn: currentBalance.totalWithdrawn + amount
           };
+          
+          // Validate updated wallet data
+          if (!validateWalletData(updatedBalance)) {
+            console.error('Invalid wallet data after withdrawal:', updatedBalance);
+            return undefined; // Abort transaction
+          }
+          
+          return updatedBalance;
         });
         
         if (result.committed) {
+          const finalWalletData = result.snapshot.val();
+          
+          // Final validation after transaction
+          if (!validateWalletData(finalWalletData)) {
+            console.error('Invalid wallet data returned from transaction:', finalWalletData);
+            // Rollback request status if wallet data is invalid
+            await update(requestRef, { status: 'pending' });
+            throw new Error('Wallet validation failed after withdrawal');
+          }
+          
           // Update user profile total withdrawn
           const userSnap = await get(ref(database, `users/${userId}`));
           if (userSnap.exists()) {
             const userData = userSnap.val();
+            
+            // Validate user data before updating
+            const currentTotalWithdrawn = typeof userData.totalWithdrawn === 'number' ? userData.totalWithdrawn : 0;
+            
+            // Validate new value
+            if (currentTotalWithdrawn + amount < 0) {
+              throw new Error('Invalid total withdrawn value');
+            }
+            
             await update(ref(database, `users/${userId}`), {
-              totalWithdrawn: (userData.totalWithdrawn || 0) + amount
+              totalWithdrawn: currentTotalWithdrawn + amount
             });
           }
           
@@ -538,6 +831,11 @@ export const applyToCampaign = async (
   if (currentUserId && currentUserId !== userId) {
     throw new Error('Unauthorized: You can only apply to campaigns for yourself');
   }
+  
+  // Validate input parameters
+  if (!campaignId || !userId || !userName || typeof reward !== 'number' || reward <= 0 || reward > 10000) {
+    throw new Error('Invalid parameters for campaign application');
+  }
 
   const campaignRef = ref(database, `campaigns/${campaignId}`);
   const workRef = ref(database, `works/${userId}/${campaignId}`);
@@ -556,6 +854,12 @@ export const applyToCampaign = async (
     }
 
     const campaignData = campaignSnap.val();
+    
+    // Validate campaign data
+    if (!validateCampaignData(campaignData)) {
+      throw new Error('Invalid campaign data');
+    }
+    
     if (campaignData.status !== 'active') {
       throw new Error('Campaign is not active');
     }
@@ -575,6 +879,11 @@ export const applyToCampaign = async (
       submittedAt: Date.now(),
       reward,
     };
+    
+    // Validate work data before creating
+    if (typeof workData.reward !== 'number' || workData.reward <= 0 || workData.reward > 10000) {
+      throw new Error('Invalid reward in work data');
+    }
 
     await set(workRef, workData);
 
@@ -606,6 +915,16 @@ export const submitWorkForCampaign = async (
   if (currentUserId && currentUserId !== userId) {
     throw new Error('Unauthorized: You can only submit work for yourself');
   }
+  
+  // Validate input parameters
+  if (!campaignId || !userId || !proofUrl) {
+    throw new Error('Invalid parameters for work submission');
+  }
+  
+  // Validate proof URL
+  if (!proofUrl.startsWith('http://') && !proofUrl.startsWith('https://')) {
+    throw new Error('Invalid proof URL');
+  }
 
   const workRef = ref(database, `works/${userId}/${campaignId}`);
 
@@ -619,6 +938,11 @@ export const submitWorkForCampaign = async (
     const workData = workSnap.val();
     if (workData.status !== 'pending' && workData.status !== 'rejected') {
       throw new Error('Work has already been submitted and is awaiting review');
+    }
+    
+    // Validate work data
+    if (typeof workData.reward !== 'number' || workData.reward <= 0 || workData.reward > 10000) {
+      throw new Error('Invalid reward in work data');
     }
 
     // Update work with proof
@@ -650,6 +974,11 @@ export const rejectWorkAndRestoreCampaignBudget = async (
   if (currentAdminId && !(await verifyUserAuthorization(currentAdminId, userId, 'admin'))) {
     throw new Error('Unauthorized: Only admins can reject work');
   }
+  
+  // Validate input parameters
+  if (!workId || !userId || !campaignId) {
+    throw new Error('Invalid parameters for work rejection');
+  }
 
   const workRef = ref(database, `works/${userId}/${workId}`);
   const campaignRef = ref(database, `campaigns/${campaignId}`);
@@ -665,6 +994,11 @@ export const rejectWorkAndRestoreCampaignBudget = async (
     if (workData.status !== 'pending') {
       throw new Error('Work is not in pending status');
     }
+    
+    // Validate work data
+    if (typeof workData.reward !== 'number' || workData.reward <= 0 || workData.reward > 10000) {
+      throw new Error('Invalid reward in work data');
+    }
 
     // Update work status to rejected
     await update(workRef, {
@@ -675,6 +1009,12 @@ export const rejectWorkAndRestoreCampaignBudget = async (
     const campaignSnap = await get(campaignRef);
     if (campaignSnap.exists()) {
       const campaignData = campaignSnap.val();
+      
+      // Validate campaign data
+      if (!validateCampaignData(campaignData)) {
+        throw new Error('Invalid campaign data');
+      }
+      
       if (campaignData.completedWorkers > 0) {
         await update(campaignRef, {
           completedWorkers: Math.max(0, campaignData.completedWorkers - 1)

@@ -181,6 +181,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!isValidName(fullName)) {
       throw new Error('Full name must contain only letters, spaces, hyphens, and apostrophes, and be between 2-50 characters');
     }
+    
+    // Additional security: Check for duplicate emails
+    const usersSnap = await get(ref(database, 'users'));
+    if (usersSnap.exists()) {
+      const users = usersSnap.val();
+      for (const [uid, userData] of Object.entries(users)) {
+        if ((userData as UserProfile).email === email) {
+          throw new Error('A user with this email already exists');
+        }
+      }
+    }
 
     const { user } = await createUserWithEmailAndPassword(auth, email, password);
     await sendEmailVerification(user);
@@ -248,6 +259,64 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const updateProfile = async (data: Partial<UserProfile>) => {
     if (!user) return;
     
+    // Sanitize profile data to prevent XSS and injection attacks
+    const sanitizedData: Partial<UserProfile> = {};
+    
+    if (data.fullName) {
+      sanitizedData.fullName = sanitizeInput(data.fullName);
+      // Additional validation for name
+      if (!isValidName(data.fullName)) {
+        throw new Error('Full name must contain only letters, spaces, hyphens, and apostrophes, and be between 2-50 characters');
+      }
+    }
+    
+    if (data.bio) {
+      sanitizedData.bio = sanitizeInput(data.bio);
+      // Additional validation for bio
+      if (data.bio.length > 500) {
+        throw new Error('Bio must be less than 500 characters');
+      }
+    }
+    
+    if (data.profileImage) {
+      // Validate URL before saving
+      if (isValidUrl(data.profileImage)) {
+        sanitizedData.profileImage = data.profileImage;
+      } else {
+        throw new Error('Invalid profile image URL');
+      }
+    }
+    
+    if (data.socialLinks) {
+      sanitizedData.socialLinks = {};
+      
+      if (data.socialLinks.linkedin && isValidUrl(data.socialLinks.linkedin)) {
+        sanitizedData.socialLinks.linkedin = data.socialLinks.linkedin;
+      } else if (data.socialLinks.linkedin) {
+        throw new Error('Invalid LinkedIn URL');
+      }
+      if (data.socialLinks.twitter && isValidUrl(data.socialLinks.twitter)) {
+        sanitizedData.socialLinks.twitter = data.socialLinks.twitter;
+      } else if (data.socialLinks.twitter) {
+        throw new Error('Invalid Twitter URL');
+      }
+      if (data.socialLinks.instagram && isValidUrl(data.socialLinks.instagram)) {
+        sanitizedData.socialLinks.instagram = data.socialLinks.instagram;
+      } else if (data.socialLinks.instagram) {
+        throw new Error('Invalid Instagram URL');
+      }
+      if (data.socialLinks.youtube && isValidUrl(data.socialLinks.youtube)) {
+        sanitizedData.socialLinks.youtube = data.socialLinks.youtube;
+      } else if (data.socialLinks.youtube) {
+        throw new Error('Invalid YouTube URL');
+      }
+      if (data.socialLinks.other && isValidUrl(data.socialLinks.other)) {
+        sanitizedData.socialLinks.other = data.socialLinks.other;
+      } else if (data.socialLinks.other) {
+        throw new Error('Invalid Other URL');
+      }
+    }
+=======
     // Sanitize profile data to prevent XSS and injection attacks
     const sanitizedData: Partial<UserProfile> = {};
     
